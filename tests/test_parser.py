@@ -83,13 +83,14 @@ def test_unlabeled_or_ambiguous_money_is_never_guessed():
     assert any("หลายค่า" in warning for warning in receipt.warnings)
 
 
-def test_wallet_is_not_classified_as_an_expense():
+def test_bkk_wallet_is_expense_per_owner_policy():
     receipt = parse_receipt(
         doc("Bangkok Bank\nจำนวนเงิน\n88.50 THB\nไปที่ ng มันนี่\nService Code:TMNTOPUP")
     )
     assert receipt.recipient == "ทรูมันนี่ วอลเล็ท"
-    assert "expense" not in receipt.to_dict()
-    assert any("ย้ายเงิน" in warning for warning in receipt.warnings)
+    assert receipt.issuer_bank == "BKK"
+    assert receipt.transaction_type == "expense"
+    assert not any("ย้ายเงิน" in warning for warning in receipt.warnings)
 
 
 @pytest.mark.parametrize("value", ["NaN", "Infinity", "-1", "12.345", "1000000000", "junk"])
@@ -112,3 +113,82 @@ def test_reference_label_with_dropped_tone_marks():
 def test_bank_brand_does_not_override_explicit_foreign_currency():
     receipt = parse_receipt(doc("Bangkok Bank\nจำนวนเงิน\n88.50 USD"))
     assert receipt.currency is None
+
+
+def test_kbank_issuer_wins_over_bangkok_recipient():
+    receipt = parse_receipt(
+        doc("""
+โอนเงินสำเร็จ K+
+7 ก.ย. 69 09:15 น.
+นาย ผู้ส่งทดสอบ
+ธ.กสิกรไทย
+xxx-x-x1111-x
+นาย ผู้รับทดสอบ
+ธ.กรุงเทพ
+xxx-x-x2222-x
+เลขที่รายการ:
+0123456789TEST1234
+จำนวน:
+88.50 บาท
+ค่าธรรมเนียม:
+0.00 บาท
+""")
+    )
+    assert receipt.issuer_bank == "KBANK"
+    assert receipt.transaction_type == "income"
+    assert receipt.amount == Decimal("88.50")
+    assert receipt.recipient == "นาย ผู้รับทดสอบ"
+    assert receipt.reference == "0123456789TEST1234"
+    assert receipt.occurred_at.isoformat() == "2026-09-07T09:15:00+07:00"
+
+
+def test_ktb_layout_hyphen_date_and_alphanumeric_reference():
+    receipt = parse_receipt(
+        doc("""
+Krungthai กรุงไทย
+โอนเงินสำเร็จ
+รหัสอ้างอิง Ac0123456789abcd
+จาก
+ผู้ส่งทดสอบ ห***
+กรุงไทย
+XXX-X-XX111-1
+ไปยัง
+นาย ผู้รับทดสอบ
+กรุงเทพ
+XXX-X-XX222-2
+จำนวนเงิน 1,234.56 บาท
+ค่าธรรมเนียม 0.00 บาท
+วันที่ทำรายการ 7 ก.ย. 2569 - 09:15
+""")
+    )
+    assert receipt.issuer_bank == "KTB"
+    assert receipt.transaction_type == "income"
+    assert receipt.amount == Decimal("1234.56")
+    assert receipt.recipient == "นาย ผู้รับทดสอบ"
+    assert receipt.reference == "Ac0123456789abcd"
+    assert receipt.occurred_at.isoformat() == "2026-09-07T09:15:00+07:00"
+
+
+def test_recipient_bank_alone_does_not_classify_a_slip():
+    receipt = parse_receipt(
+        doc("โอนเงินสำเร็จ\nนาย ทดสอบ\nxxx-x-x1111-x\nธนาคารกรุงเทพ\nจำนวนเงิน 88.50 บาท")
+    )
+    assert receipt.issuer_bank is None
+    assert receipt.transaction_type is None
+
+
+def test_kbank_sender_layout_fallback_when_logo_missing():
+    receipt = parse_receipt(
+        doc(
+            "โอนเงินสำเร็จ\nนาย ทดสอบ\nธ.กสิกรไทย\nxxx-x-x1111-x\nนาย ตัวอย่าง\nธ.กรุงเทพ\nxxx-x-x2222-x\nจำนวน: 88.50 บาท"
+        )
+    )
+    assert receipt.issuer_bank == "KBANK"
+
+
+def test_bkk_wallet_name_does_not_include_garbled_service_code():
+    receipt = parse_receipt(
+        doc("Bangkok Bank\nจำนวนเงิน\n88.50 THB\nไปที่ ng มันนี่ วอลเล็ท Service 00ด6:1ไหผาอป")
+    )
+    assert receipt.recipient == "ทรูมันนี่ วอลเล็ท"
+    assert receipt.transaction_type == "expense"

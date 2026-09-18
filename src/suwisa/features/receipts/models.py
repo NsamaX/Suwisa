@@ -22,6 +22,8 @@ class OcrEngine(Protocol):
 @dataclass
 class Receipt:
     document_type: str = "unknown"
+    issuer_bank: str | None = None
+    transaction_type: str | None = None
     amount: Decimal | None = None
     currency: str | None = None
     occurred_at: datetime | None = None

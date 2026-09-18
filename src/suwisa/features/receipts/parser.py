@@ -6,6 +6,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
+from suwisa.features.receipts.classification import classify
 from suwisa.features.receipts.models import OcrDocument, Receipt
 
 THAI_DIGITS = str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789")
@@ -51,7 +52,7 @@ def parse_money(text: str) -> Decimal | None:
 def parse_date(text: str) -> datetime | None:
     text = normalized(text)
     # Thai short years are Buddhist Era (69 -> 2569 -> 2026).
-    thai = re.search(r"(\d{1,2})\s*([ก-๙.\s]+?)\s*(\d{2,4})\s*[, ]+\s*(\d{1,2}):(\d{2})", text)
+    thai = re.search(r"(\d{1,2})\s*([ก-๙.\s]+?)\s*(\d{2,4})\s*[,\s-]+\s*(\d{1,2}):(\d{2})", text)
     if thai:
         day, label, year, hour, minute = thai.groups()
         label = re.sub(r"[.\s\u0e38-\u0e3a\u0e48-\u0e4c]", "", label)
@@ -98,13 +99,23 @@ def recipient_from(lines: list[str]) -> str | None:
     active = False
     for line in lines:
         key = compact(line)
-        if key.startswith("ไปที่") or re.match(r"^to\s*[: ]", line, re.I):
+        if key.startswith(("ไปที่", "ไปยัง")) or re.match(r"^to\s*[: ]", line, re.I):
             active = True
-            line = re.sub(r"^\s*(ไป\s*ที่|To)\s*:?\s*", "", line, flags=re.I)
+            line = re.sub(r"^\s*(ไป\s*(?:ที่|ยัง)|To)\s*:?\s*", "", line, flags=re.I)
         elif active and (
             any(
                 marker in key
-                for marker in ("servicecode", "หมายเลข", "เบอร์โทร", "ค่าธรรมเนียม", "เลขที่", "ธนาคาร")
+                for marker in (
+                    "service",
+                    "หมายเลข",
+                    "เบอร์โทร",
+                    "ค่าธรรมเนียม",
+                    "เลขที่",
+                    "ธนาคาร",
+                    "กรุงเทพ",
+                    "กรุงไทย",
+                    "กสิกรไทย",
+                )
             )
             or re.match(r"^[\dXx*%-]{5}", key)
         ):
@@ -112,6 +123,7 @@ def recipient_from(lines: list[str]) -> str | None:
         elif not active:
             continue
         # Logos can be read as isolated symbols or digits next to a name.
+        line = re.split(r"\bservice\b", line, flags=re.I)[0]
         line = re.sub(r"^[^ก-๙A-Za-z]+", "", line).strip()
         if line:
             parts.append(line)
@@ -125,12 +137,61 @@ def recipient_from(lines: list[str]) -> str | None:
     return result[:300]
 
 
+def issuing_bank(lines: list[str]) -> str | None:
+    # Only header branding identifies an issuer. Bank names below account blocks
+    # may belong to the receiver (including Bangkok Bank on KBank/KTB slips).
+    header_lines = []
+    for line in lines[:6]:
+        if re.search(r"[xX*%]{2,}|^(?:จาก|ไปที่|ไปยัง)|(?:นาย|นาง)\s", line):
+            break
+        header_lines.append(line)
+    header = compact("\n".join(header_lines))
+    brands = set()
+    if "bangkokbank" in header or "ธนาคารกรุงเทพ" in header:
+        brands.add("BKK")
+    if "krungthai" in header or "กรุงไทย" in header:
+        brands.add("KTB")
+    if (
+        "k+" in header
+        or "kplus" in header
+        or re.search(r"\bkbank\b", " ".join(header_lines), re.I)
+        or "กสิกรไทย" in header
+    ):
+        brands.add("KBANK")
+    if brands:
+        return next(iter(brands)) if len(brands) == 1 else None
+    # K+ logo is sometimes missed. Accept its distinctive two-account layout,
+    # only when the first account's bank is Kasikorn, never the second account.
+    first_account = next(
+        (i for i, line in enumerate(lines) if re.search(r"[xX*%]{2,}", line)), None
+    )
+    if first_account is not None:
+        before = compact("\n".join(lines[:first_account]))
+        transfer = "โอนเงินสําเร็จ" in before or "โอนเงินสำเร็จ" in before
+        if transfer and "กสิกรไทย" in before and "กรุงเทพ" not in before and "กรุงไทย" not in before:
+            return "KBANK"
+    return None
+
+
+def kbank_recipient(lines: list[str]) -> str | None:
+    accounts = [i for i, line in enumerate(lines) if re.search(r"[xX*%]{2,}", line)]
+    if len(accounts) < 2:
+        return None
+    for line in lines[accounts[0] + 1 : accounts[1]]:
+        match = re.search(r"(?:นาย|นางสาว|นาง|บริษัท|ร้าน)\s*.+", line)
+        if match:
+            return match.group()[:300]
+    return None
+
+
 def parse_receipt(document: OcrDocument) -> Receipt:
     text = normalized(document.text)
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     key = compact(text)
-    bank_slip = "bangkokbank" in key or "ธนาคารกรุงเทพ" in key
+    bank = issuing_bank(lines)
+    bank_slip = bank is not None or "โอนเงินสําเร็จ" in key or "โอนเงินสำเร็จ" in key
     receipt = Receipt(document_type="bank_slip" if bank_slip else "receipt")
+    classify(receipt, bank)
     receipt.amount, ambiguous = labeled_amount(
         lines,
         (
@@ -142,6 +203,8 @@ def parse_receipt(document: OcrDocument) -> Receipt:
             "รวมสุทธิ",
             "grandtotal",
             "amountpaid",
+            "จํานวน:",
+            "จำนวน:",
         )
         if bank_slip
         else ("รวมสุทธิ", "ยอดสุทธิ", "ยอดรวม", "grandtotal", "amountpaid", "totaldue"),
@@ -157,12 +220,17 @@ def parse_receipt(document: OcrDocument) -> Receipt:
         receipt.currency = None
     receipt.occurred_at = parse_date(document.date_text) or parse_date(text)
     receipt.recipient = recipient_from(lines) if bank_slip else None
-    if bank_slip and "servicecode:tmntopup" in key:
+    if bank == "KBANK" and receipt.recipient is None:
+        receipt.recipient = kbank_recipient(lines)
+    if bank == "BKK" and ("tmntopup" in key or ("มันนี่" in key and "วอลเล" in key)):
         receipt.recipient = "ทรูมันนี่ วอลเล็ท"
     for index, line in enumerate(lines):
         label = re.sub(r"[\u0e48-\u0e4c]", "", compact(line))
-        if "เลขทีอางอิง" in label:
-            match = re.search(r"\b\d{10,30}\b", " ".join(lines[index : index + 2]))
+        if any(marker in label for marker in ("เลขทีอางอิง", "เลขทีรายการ", "รหัสอางอิง")):
+            match = re.search(
+                r"\b(?=[A-Za-z0-9]{8,40}\b)(?=[A-Za-z0-9]*\d)[A-Za-z0-9]+\b",
+                " ".join(lines[index : index + 2]),
+            )
             if match:
                 receipt.reference = match.group()
                 break
@@ -176,8 +244,6 @@ def parse_receipt(document: OcrDocument) -> Receipt:
         receipt.warnings.append("อ่านชื่อผู้รับหรือร้านค้าไม่ชัด กรุณาตรวจจากภาพ")
     if document.confidence < 80:
         receipt.warnings.append("ข้อความบางส่วนอ่านไม่ชัด โดยเฉพาะชื่อผู้รับ โปรดตรวจทุกช่อง")
-    if "ทรูมันนี่" in key or "tmntopup" in key:
-        receipt.warnings.append("อาจเป็นการเติมวอลเล็ต ต้องแยกการย้ายเงินจากรายจ่าย")
     if not bank_slip:
         receipt.warnings.append("รูปแบบทั่วไป: ยังไม่รองรับการแยกรายการสินค้า และชื่อร้านอัตโนมัติ")
     if receipt.currency is None:

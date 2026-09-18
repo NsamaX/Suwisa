@@ -50,3 +50,43 @@ def test_unread_or_zero_total_cannot_be_confirmed(tmp_path):
         repo.save(scan(amount="0"), 1, 2)
     with pytest.raises(ValueError):
         repo.backup(repo.path)
+
+
+def test_reconfirm_legacy_receipt_adds_classification_without_duplicate(tmp_path):
+    repo = ReceiptRepository(tmp_path / "data.sqlite3")
+    original = scan()
+    repo.save(original, 1, 2)
+    from suwisa.features.receipts.classification import classify
+
+    classify(original.receipt, "BKK")
+    assert repo.save(original, 1, 2) == (1, False)
+    with closing(repo.connect()) as db:
+        assert db.execute("SELECT count(*) FROM receipts").fetchone()[0] == 1
+        payload = json.loads(db.execute("SELECT payload FROM receipts").fetchone()[0])
+    assert payload["transaction_type"] == "expense"
+    assert payload["issuer_bank"] == "BKK"
+    assert payload["amount"] == "88.50"
+
+
+def test_classification_cannot_overwrite_a_different_reviewed_amount(tmp_path):
+    repo = ReceiptRepository(tmp_path / "data.sqlite3")
+    repo.save(scan(), 1, 2)
+    changed = scan(amount="99.99")
+    from suwisa.features.receipts.classification import classify
+
+    classify(changed.receipt, "KBANK")
+    with pytest.raises(ReceiptError):
+        repo.save(changed, 1, 2)
+    with closing(repo.connect()) as db:
+        payload = json.loads(db.execute("SELECT payload FROM receipts").fetchone()[0])
+    assert payload["amount"] == "88.50"
+    assert payload["issuer_bank"] is None
+
+
+def test_bank_type_mismatch_is_rejected(tmp_path):
+    repo = ReceiptRepository(tmp_path / "data.sqlite3")
+    item = scan()
+    item.receipt.issuer_bank = "BKK"
+    item.receipt.transaction_type = "income"
+    with pytest.raises(ReceiptError):
+        repo.save(item, 1, 2)

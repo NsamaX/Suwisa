@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import discord
 
+from suwisa.features.receipts.classification import BANK_LABELS, classification_label, classify
 from suwisa.features.receipts.models import ReceiptError, ReceiptScan
 from suwisa.features.receipts.parser import AMOUNT_WARNING, DATE_WARNING, parse_money
 from suwisa.features.receipts.presentation import receipt_embed
@@ -58,12 +59,27 @@ class ReviewView(discord.ui.View):
             self.closed = True
             self.stop()
             text = (
-                f"เก็บผลอ่านแล้ว เลขที่ {receipt_id}"
+                f"บันทึกรายการแล้ว เลขที่ {receipt_id} • {classification_label(self.scan.receipt)}"
                 if created
-                else f"มีผลอ่านนี้แล้ว เลขที่ {receipt_id} จึงไม่บันทึกซ้ำ"
+                else f"รายการเดิมเลขที่ {receipt_id} • {classification_label(self.scan.receipt)} • ไม่เพิ่มรายการซ้ำ"
             )
-            await interaction.edit_original_response(
-                content=text + " • ยังไม่ลงรายรับรายจ่าย", view=None
+            await interaction.edit_original_response(content=text, view=None)
+
+    @discord.ui.select(
+        placeholder="แก้ธนาคารผู้ออกสลิป (ใช้กำหนดรายรับ/รายจ่าย)",
+        options=[
+            discord.SelectOption(label=label, value=bank) for bank, label in BANK_LABELS.items()
+        ],
+        row=1,
+    )
+    async def bank(self, interaction: discord.Interaction, select: discord.ui.Select):
+        async with self.lock:
+            if self.closed:
+                await interaction.response.send_message("รายการนี้ปิดแล้ว", ephemeral=True)
+                return
+            classify(self.scan.receipt, select.values[0])
+            await interaction.response.edit_message(
+                embed=receipt_embed(self.scan.receipt), view=self
             )
 
     @discord.ui.button(label="แก้ไข", style=discord.ButtonStyle.primary)

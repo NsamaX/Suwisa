@@ -86,3 +86,16 @@ def test_ocr_text_cannot_ping_people_or_exceed_embed_limits():
     assert "@everyone" not in embed.fields[3].value
     assert len(embed.fields[3].value) <= 1024
     assert len(embed) < 6000
+
+
+async def test_bank_menu_changes_classification_before_save():
+    repo = Mock(spec=ReceiptRepository)
+    view = ReviewView(ReceiptScan(Receipt(), "a", 90), repo, 1, 2)
+    view.bank._values = ["KBANK"]
+    interaction = SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock()))
+    await view.bank.callback(interaction)
+    assert view.scan.receipt.issuer_bank == "KBANK"
+    assert view.scan.receipt.transaction_type == "income"
+    repo.save.assert_not_called()
+    interaction.response.edit_message.assert_awaited_once()
+    view.stop()

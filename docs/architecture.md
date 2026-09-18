@@ -16,14 +16,17 @@ The OCR engine implements `OcrEngine`. Storage depends on receipt models. `bot.p
 4. Add storage migrations if needed. SQLite `PRAGMA user_version` currently equals 1; upgrade existing databases transactionally. Do not drop tables to migrate.
 5. Test business rules and authorization before enabling the feature.
 
-For income/expense recording, introduce a separate ledger model. A reviewed receipt is evidence, not automatically an expense. A wallet top-up may be an internal transfer. Store money with exact decimals or integer minor units, never floats. Receipt payloads currently use decimal strings.
+Reviewed receipts now store `issuer_bank` and `transaction_type`. The owner's explicit convention is BKK -> expense (including wallet top-ups), KBank/KTB -> income. This is a personal bookkeeping rule, not a universal interpretation of transfers. `classification.py` owns the mapping. Money remains exact decimal strings; fees are separate and not added to amount automatically. Summaries or a full ledger can be added as separate features.
+
+Existing JSON payloads remain readable without a schema change. Old rows are not automatically assigned a bank from incomplete data. Reconfirming the same image/reference can update its classification, but cannot change the reviewed amount/currency. The original row ID and monetary data survive.
 
 ## OCR and parsing
 
 - Implement `OcrEngine.read(bytes) -> OcrDocument` and select it in `bot.py` / CLI. Cloud OCR should be an explicit configured provider because it sends receipts outside the machine.
 - Add a parser module for each new bank layout; reuse amount/date helpers.
 - Prefer missing values and review warnings over guesses. Never infer dates from reference numbers or use the largest number as a total.
-- Recipient normalization is limited to recognized identifiers such as `TMNTOPUP`; it does not authenticate a transaction.
+- Identify issuing banks from header branding and the supported source-account layout, not arbitrary bank names anywhere in the slip. In particular, a Bangkok Bank receiver on a KBank/KTB slip does not make it a BKK expense.
+- Recipient normalization uses recognized identifiers such as `TMNTOPUP` or the wallet name on BKK slips; it does not authenticate a transaction.
 
 ## Lifecycle
 

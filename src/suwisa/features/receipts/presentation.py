@@ -1,5 +1,6 @@
 import discord
 
+from suwisa.features.receipts.classification import classification_label
 from suwisa.features.receipts.models import Receipt
 
 
@@ -25,11 +26,12 @@ def receipt_embed(receipt: Receipt) -> discord.Embed:
         inline=False,
     )
     embed.add_field(name="ผู้รับ / ร้านค้า", value=safe_text(receipt.recipient), inline=False)
+    embed.add_field(name="ประเภทรายการ", value=classification_label(receipt), inline=False)
     if receipt.warnings:
         embed.add_field(
             name="โปรดตรวจสอบ",
             value="\n".join(f"• {safe_text(w)}" for w in receipt.warnings)[:1024],
             inline=False,
         )
-    embed.set_footer(text="ยืนยันเพื่อเก็บผลอ่านเท่านั้น • ยังไม่ลงรายรับรายจ่าย • ไม่ใช่การตรวจสลิปแท้")
+    embed.set_footer(text="จัดประเภทตามธนาคารผู้ออกสลิป • บันทึกเมื่อยืนยัน • ไม่ใช่การตรวจสลิปแท้")
     return embed
